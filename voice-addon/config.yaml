@@ -1,0 +1,18 @@
+name: "Perfecto Voice Broker"
+version: "0.1.0"
+slug: "perfecto_voice_broker"
+description: "Test-only OpenAI Realtime session broker for Perfecto"
+url: "https://github.com/arlmhome/perfecto-voice-addon"
+startup: application
+boot: auto
+init: false
+arch:
+  - amd64
+  - aarch64
+options:
+  openai_api_key: ""
+schema:
+  openai_api_key: password
+ingress: true
+ingress_port: 8099
+panel_icon: mdi:microphone
