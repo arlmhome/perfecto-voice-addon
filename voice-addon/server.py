@@ -1,5 +1,6 @@
 """Home Assistant ingress-only broker for short-lived OpenAI Realtime client secrets."""
 import json
+from pathlib import Path
 import os
 import urllib.error
 import urllib.request
@@ -10,6 +11,15 @@ MODEL = "gpt-realtime"
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        if self.path.split("?", 1)[0] in ("/", "/index.html"):
+            page = Path("/app/index.html").read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(page)))
+            self.end_headers()
+            self.wfile.write(page)
+            return
         if self.path != "/health":
             self.send_error(404)
             return
