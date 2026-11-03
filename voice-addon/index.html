@@ -6,17 +6,17 @@
 <script>
 (() => {
   const startButton=document.getElementById('start'),stopButton=document.getElementById('stop'),status=document.getElementById('status'),error=document.getElementById('error');
-  let pc=null,stream=null,audio=null,channel=null,connecting=false,stage='idle';
+  let pc=null,stream=null,audio=null,channel=null,connecting=false,stage='idle',generation=0,connectTimer=null;
   function state(message){status.textContent=message;}
-  function cleanup(){if(channel){try{channel.close();}catch(e){}channel=null;}if(pc){try{pc.close();}catch(e){}pc=null;}if(stream){stream.getTracks().forEach(t=>t.stop());stream=null;}if(audio){audio.pause();audio.srcObject=null;audio.remove();audio=null;}connecting=false;startButton.disabled=false;stopButton.disabled=true;state('Ready to connect');}
+  function cleanup(){generation++;if(connectTimer){clearTimeout(connectTimer);connectTimer=null;}if(channel){try{channel.close();}catch(e){}channel=null;}if(pc){try{pc.close();}catch(e){}pc=null;}if(stream){stream.getTracks().forEach(t=>t.stop());stream=null;}if(audio){audio.pause();audio.srcObject=null;audio.remove();audio=null;}connecting=false;startButton.disabled=false;stopButton.disabled=true;state('Ready to connect');}
   stopButton.onclick=cleanup;
   startButton.onclick=async()=>{
     if(connecting||pc)return;
-    error.textContent='';connecting=true;startButton.disabled=true;stopButton.disabled=false;stage='microphone';state('Requesting microphone…');
+    error.textContent='';const attempt=++generation;connecting=true;startButton.disabled=true;stopButton.disabled=false;stage='microphone';state('Requesting microphone…');
     try{
       if(!navigator.mediaDevices?.getUserMedia)throw Error('Microphone unavailable. Open this page over HTTPS.');
       stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true}});
-      if(!connecting)return;
+      if(!connecting||generation!==attempt)return;
       stage='session';state('Creating secure session…');
       const response=await fetch(new URL('session', document.baseURI),{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:'{}',cache:'no-store'});
       const raw=await response.text();let session;try{session=JSON.parse(raw);}catch(_){throw Error('Session endpoint returned non-JSON (HTTP '+response.status+'). Check Home Assistant ingress routing.');}
@@ -26,17 +26,21 @@
       pc=new RTCPeerConnection();
       audio=document.createElement('audio');audio.autoplay=true;audio.playsInline=true;audio.style.display='none';document.body.append(audio);
       pc.ontrack=e=>{audio.srcObject=e.streams[0];audio.play().catch(()=>{state('Tap to allow speaker playback');});};
-      pc.onconnectionstatechange=()=>{if(!pc)return;if(['failed','disconnected','closed'].includes(pc.connectionState)){cleanup();}else if(pc.connectionState==='connected')state('Connected — speak to Perfecto');};
+      pc.onconnectionstatechange=()=>{if(!pc||generation!==attempt)return;const cs=pc.connectionState;if(cs==='failed'){cleanup();error.textContent='WebRTC connection failed. Check network/firewall or browser restrictions.';}else if(cs==='connected'){if(connectTimer){clearTimeout(connectTimer);connectTimer=null;}connecting=false;state('Connected — speak to Perfecto');}else if(cs==='disconnected'){state('Audio connection interrupted — reconnecting…');}};
+      pc.oniceconnectionstatechange=()=>{if(pc&&generation===attempt&&pc.iceConnectionState==='checking')state('Checking audio network path…');};
       stream.getTracks().forEach(track=>pc.addTrack(track,stream));
       channel=pc.createDataChannel('oai-events');
       channel.onmessage=e=>{try{const msg=JSON.parse(e.data);if(msg.type==='input_audio_buffer.speech_started')state('Listening…');else if(msg.type==='response.created')state('Perfecto is thinking…');else if(msg.type==='response.audio.delta'||msg.type==='response.output_audio.delta')state('Perfecto is speaking…');else if(msg.type==='response.done')state('Connected — ask another question');else if(msg.type==='error')error.textContent=msg.error?.message||'Voice session error';}catch(_){}};
       const offer=await pc.createOffer();await pc.setLocalDescription(offer);
       stage='webrtc';state('Connecting to OpenAI…');
-      const sdp=await fetch('https://api.openai.com/v1/realtime/calls',{method:'POST',headers:{Authorization:'Bearer '+ephemeral,'Content-Type':'application/sdp'},body:offer.sdp});
+      const abort=new AbortController();const fetchTimer=setTimeout(()=>abort.abort(),15000);let sdp;try{sdp=await fetch('https://api.openai.com/v1/realtime/calls',{method:'POST',headers:{Authorization:'Bearer '+ephemeral,'Content-Type':'application/sdp'},body:offer.sdp,signal:abort.signal});}finally{clearTimeout(fetchTimer);}if(generation!==attempt)return;
       if(!sdp.ok)throw Error('Realtime connection failed (HTTP '+sdp.status+')');
       await pc.setRemoteDescription({type:'answer',sdp:await sdp.text()});
-      connecting=false;
-    }catch(e){const at=stage;const reason=e?.message||'Connection failed';cleanup();error.textContent='Failed at '+at+': '+reason+(reason==='Load failed'?' — check browser network permissions, Nabu Casa ingress and connectivity.':'');}
+      if(generation!==attempt)return;
+      stage='ice';state('Negotiating audio connection…');
+      connectTimer=setTimeout(()=>{if(generation!==attempt||!pc||pc.connectionState==='connected')return;const ice=pc.iceConnectionState;cleanup();error.textContent='Audio connection timed out (ICE: '+ice+'). The network may be blocking WebRTC UDP traffic.';},15000);
+      if(pc.connectionState==='connected'){clearTimeout(connectTimer);connectTimer=null;connecting=false;state('Connected — speak to Perfecto');}
+    }catch(e){const at=stage;const reason=e?.name==='AbortError'?'OpenAI connection request timed out after 15 seconds':(e?.message||'Connection failed');cleanup();error.textContent='Failed at '+at+': '+reason+(reason==='Load failed'?' — check browser network permissions, Nabu Casa ingress and connectivity.':'');}
   };
   window.addEventListener('pagehide',cleanup);
 })();
