@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Perfecto Voice</title>
+<style>
+:root{color-scheme:dark;font-family:system-ui,sans-serif;background:#0d2233;color:#eef7ff}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:20px}.panel{width:min(520px,100%);padding:28px;border:1px solid #365b72;border-radius:22px;background:#17354b;box-shadow:0 12px 40px #0004}h1{margin:0 0 8px;font-size:26px}p{color:#b7cddc;line-height:1.5}button{background:#167ca8;color:#fff;border:1px solid #5ac4e9;border-radius:14px;padding:14px 18px;font:inherit;cursor:pointer;min-height:48px}button:disabled{opacity:.5;cursor:wait}.actions{display:flex;gap:12px;flex-wrap:wrap;margin-top:20px}.state{padding:14px;border:1px solid #42637b;border-radius:12px;background:#203f54;margin:20px 0}#error{color:#ffb2b2;white-space:pre-wrap}small{color:#a8c1d3}
+</style></head><body><main class="panel"><h1>🎙 Perfecto Voice</h1><p>Speak naturally with Perfecto using OpenAI Realtime. Home device controls are not enabled yet.</p><div class="state" id="status" role="status" aria-live="polite">Ready to connect</div><div class="actions"><button id="start">Start conversation</button><button id="stop" disabled>End conversation</button></div><p id="error" role="alert"></p><small>Microphone access requires HTTPS and permission. Conversation audio is sent to OpenAI. End the session when finished.</small></main>
+<script>
+(() => {
+  const startButton=document.getElementById('start'),stopButton=document.getElementById('stop'),status=document.getElementById('status'),error=document.getElementById('error');
+  let pc=null,stream=null,audio=null,channel=null,connecting=false;
+  function state(message){status.textContent=message;}
+  function cleanup(){if(channel){try{channel.close();}catch(e){}channel=null;}if(pc){try{pc.close();}catch(e){}pc=null;}if(stream){stream.getTracks().forEach(t=>t.stop());stream=null;}if(audio){audio.pause();audio.srcObject=null;audio.remove();audio=null;}connecting=false;startButton.disabled=false;stopButton.disabled=true;state('Ready to connect');}
+  stopButton.onclick=cleanup;
+  startButton.onclick=async()=>{
+    if(connecting||pc)return;
+    error.textContent='';connecting=true;startButton.disabled=true;stopButton.disabled=false;state('Requesting microphone…');
+    try{
+      if(!navigator.mediaDevices?.getUserMedia)throw Error('Microphone unavailable. Open this page over HTTPS.');
+      stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true}});
+      if(!connecting)return;
+      state('Creating secure session…');
+      const response=await fetch('session',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:'{}',cache:'no-store'});
+      const session=await response.json();
+      if(!response.ok)throw Error(session.error||'Could not create session');
+      const ephemeral=session.value||session.client_secret?.value;
+      if(!ephemeral)throw Error('OpenAI did not return a temporary client secret');
+      pc=new RTCPeerConnection();
+      audio=document.createElement('audio');audio.autoplay=true;audio.playsInline=true;audio.style.display='none';document.body.append(audio);
+      pc.ontrack=e=>{audio.srcObject=e.streams[0];audio.play().catch(()=>{state('Tap to allow speaker playback');});};
+      pc.onconnectionstatechange=()=>{if(!pc)return;if(['failed','disconnected','closed'].includes(pc.connectionState)){cleanup();}else if(pc.connectionState==='connected')state('Connected — speak to Perfecto');};
+      stream.getTracks().forEach(track=>pc.addTrack(track,stream));
+      channel=pc.createDataChannel('oai-events');
+      channel.onmessage=e=>{try{const msg=JSON.parse(e.data);if(msg.type==='input_audio_buffer.speech_started')state('Listening…');else if(msg.type==='response.created')state('Perfecto is thinking…');else if(msg.type==='response.audio.delta'||msg.type==='response.output_audio.delta')state('Perfecto is speaking…');else if(msg.type==='response.done')state('Connected — ask another question');else if(msg.type==='error')error.textContent=msg.error?.message||'Voice session error';}catch(_){}};
+      const offer=await pc.createOffer();await pc.setLocalDescription(offer);
+      state('Connecting to OpenAI…');
+      const sdp=await fetch('https://api.openai.com/v1/realtime/calls',{method:'POST',headers:{Authorization:'Bearer '+ephemeral,'Content-Type':'application/sdp'},body:offer.sdp});
+      if(!sdp.ok)throw Error('Realtime connection failed (HTTP '+sdp.status+')');
+      await pc.setRemoteDescription({type:'answer',sdp:await sdp.text()});
+      connecting=false;
+    }catch(e){error.textContent=e.message||'Connection failed';cleanup();}
+  };
+  window.addEventListener('pagehide',cleanup);
+})();
+</script></body></html>
